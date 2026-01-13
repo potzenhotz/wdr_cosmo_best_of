@@ -1,4 +1,5 @@
 import duckdb
+import shutil
 from datetime import datetime
 from typing import List, Dict, Optional
 from pathlib import Path
@@ -8,6 +9,8 @@ class PlaylistDatabase:
     def __init__(self, db_path: str = "cosmo_playlist.duckdb"):
         self.db_path = db_path
         self.conn = None
+        self.backup_dir = Path("backups")
+        self.backup_dir.mkdir(exist_ok=True)
         self._init_database()
 
     def _init_database(self):
@@ -22,6 +25,7 @@ class PlaylistDatabase:
                 time VARCHAR,
                 date DATE NOT NULL,
                 datetime TIMESTAMP,
+                musicbrainz_genre VARCHAR,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(artist, title, datetime)
             )
@@ -39,9 +43,88 @@ class PlaylistDatabase:
             CREATE INDEX IF NOT EXISTS idx_datetime ON songs(datetime)
         """)
 
+    def _create_backup(self, operation_name: str = "") -> Path:
+        """
+        Create a backup of the database.
+
+        Args:
+            operation_name: Name of the operation being performed (for backup filename)
+
+        Returns:
+            Path to the backup file
+        """
+        if not Path(self.db_path).exists():
+            print("  ⚠ Warning: Database file doesn't exist yet, skipping backup")
+            return None
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = self.backup_dir / f"{Path(self.db_path).stem}_backup_{timestamp}.duckdb"
+
+        # Close connection temporarily to ensure file is not locked
+        was_connected = self.conn is not None
+        if self.conn:
+            self.conn.close()
+
+        try:
+            # Copy the database file
+            shutil.copy2(self.db_path, backup_path)
+            print(f"✓ Backup created: {backup_path}")
+
+            # Reconnect after backup
+            if was_connected:
+                self.conn = duckdb.connect(self.db_path)
+
+            return backup_path
+        except Exception as e:
+            print(f"  WARNING: Failed to create backup: {e}")
+            # Reconnect if we closed the connection
+            if not self.conn:
+                self.conn = duckdb.connect(self.db_path)
+            return None
+
+    def _get_row_count(self) -> int:
+        """Get current row count in songs table."""
+        try:
+            result = self.conn.execute("SELECT COUNT(*) FROM songs").fetchone()
+            return result[0] if result else 0
+        except:
+            return 0
+
+    def _verify_data_integrity(self, expected_min_rows: int, operation_name: str) -> bool:
+        """
+        Verify that the database still has data after an operation.
+
+        Args:
+            expected_min_rows: Minimum expected row count
+            operation_name: Name of the operation for error messages
+
+        Returns:
+            True if data is intact, False if data was lost
+        """
+        try:
+            current_count = self.get_total_songs()
+            if current_count == 0 and expected_min_rows > 0:
+                print(f"\n⚠️  WARNING: Data loss detected during {operation_name}!")
+                print(f"   Expected at least: {expected_min_rows} songs")
+                print(f"   Found:            0 songs")
+                return False
+            elif current_count < expected_min_rows:
+                print(f"\n⚠️  WARNING: Data loss detected during {operation_name}!")
+                print(f"   Expected at least: {expected_min_rows} songs")
+                print(f"   Found:            {current_count} songs")
+                print(f"   Missing:          {expected_min_rows - current_count} songs")
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"  ERROR during verification: {e}")
+            return False
+
     def insert_songs(self, songs: List[Dict[str, str]]) -> int:
         """
         Insert multiple songs into the database.
+        Creates backup before insertion and verifies data integrity after.
 
         Args:
             songs: List of song dictionaries
@@ -49,6 +132,10 @@ class PlaylistDatabase:
         Returns:
             Number of songs inserted (excluding duplicates)
         """
+        # Create backup before modifying data
+        rows_before = self._get_row_count()
+        backup_path = self._create_backup("insert_songs")
+
         inserted = 0
         skipped = 0
 
@@ -83,6 +170,9 @@ class PlaylistDatabase:
                 print(f"  ERROR inserting song {song.get('artist', '')} - {song.get('title', '')}: {e}")
                 continue
 
+        # Verify data integrity after insertion
+        self._verify_data_integrity(rows_before, "insert_songs")
+
         return inserted
 
     def get_songs_by_date(self, date: str) -> List[Dict]:
@@ -111,6 +201,60 @@ class PlaylistDatabase:
         """Get total number of songs in database."""
         result = self.conn.execute("SELECT COUNT(*) as count FROM songs").fetchone()
         return result[0] if result else 0
+
+    def update_genre(self, artist: str, title: str, genre: str, skip_backup: bool = False) -> int:
+        """
+        Update genre for all occurrences of a song.
+
+        Args:
+            artist: Artist name
+            title: Song title
+            genre: Genre to set
+            skip_backup: If True, skip backup (useful for batch operations)
+
+        Returns:
+            Number of rows updated
+        """
+        # Create backup before modifying data (unless explicitly skipped for batch operations)
+        if not skip_backup:
+            rows_before = self._get_row_count()
+            backup_path = self._create_backup("update_genre")
+
+        result = self.conn.execute("""
+            UPDATE songs
+            SET musicbrainz_genre = ?
+            WHERE artist = ? AND title = ?
+        """, [genre, artist, title])
+
+        # Verify data integrity after update
+        if not skip_backup:
+            self._verify_data_integrity(rows_before, "update_genre")
+
+        return result.fetchone()[0] if result else 0
+
+    def get_songs_without_genre(self, limit: Optional[int] = None) -> List[Dict]:
+        """
+        Get distinct songs that don't have genre information.
+
+        Args:
+            limit: Optional limit on number of songs to return
+
+        Returns:
+            List of dictionaries with artist and title
+        """
+        query = """
+            SELECT DISTINCT artist, title
+            FROM songs
+            WHERE musicbrainz_genre IS NULL
+            ORDER BY artist, title
+        """
+
+        if limit:
+            query += f" LIMIT {limit}"
+
+        result = self.conn.execute(query).fetchall()
+        columns = ['artist', 'title']
+        return [dict(zip(columns, row)) for row in result]
 
     def close(self):
         """Close database connection."""

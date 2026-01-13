@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from scraper import CosmoPlaylistScraper
 from database import PlaylistDatabase
 from analyzer import PlaylistAnalyzer
+from genre_enricher import MusicBrainzGenreEnricher
 
 
 def cmd_scrape(args):
@@ -159,6 +160,85 @@ def cmd_stats(args):
         print(f"Days covered:          {stats['days_covered']}")
 
 
+def cmd_enrich_genres(args):
+    """Enrich songs with genre information from MusicBrainz."""
+    db = PlaylistDatabase(args.database)
+    enricher = MusicBrainzGenreEnricher()
+
+    # Check if there are any songs in the database
+    total_songs = db.get_total_songs()
+    if total_songs == 0:
+        print("No songs in database! Please run 'scrape' command first.")
+        db.close()
+        return
+
+    # Get songs without genre
+    print("Finding songs without genre information...")
+    songs = db.get_songs_without_genre(limit=args.limit)
+
+    if not songs:
+        print("All songs already have genre information!")
+        db.close()
+        return
+
+    print(f"Found {len(songs)} unique songs without genre information")
+    print(f"Note: MusicBrainz rate limit is 1 request/second")
+    print(f"Estimated time: ~{len(songs)} seconds (~{len(songs) // 60} minutes)\n")
+
+    if not args.yes:
+        response = input(f"Proceed with enriching {len(songs)} songs? [y/N]: ")
+        if response.lower() not in ['y', 'yes']:
+            print("Aborted.")
+            db.close()
+            return
+
+    # Create a single backup before starting batch genre enrichment
+    print("\n" + "=" * 70)
+    print("Creating backup before genre enrichment...")
+    rows_before = db._get_row_count()
+    backup_path = db._create_backup("enrich_genres_batch")
+
+    print("\nEnriching genres...")
+    print("=" * 70)
+
+    found_count = 0
+    not_found_count = 0
+
+    def progress_callback(current, total, artist, title, genre):
+        nonlocal found_count, not_found_count
+
+        if genre:
+            found_count += 1
+            print(f"[{current}/{total}] ✓ {artist} - {title}")
+            print(f"         Genre: {genre}")
+            # Skip backup for individual updates during batch operation
+            db.update_genre(artist, title, genre, skip_backup=True)
+        else:
+            not_found_count += 1
+            if args.verbose:
+                print(f"[{current}/{total}] ✗ {artist} - {title} (not found)")
+
+    enricher.enrich_songs(songs, on_progress=progress_callback)
+
+    # Verify data integrity after batch enrichment
+    print("\n" + "=" * 70)
+    print("Verifying data integrity...")
+    if db._verify_data_integrity(rows_before, "enrich_genres_batch"):
+        print("✓ Data integrity verified - all songs preserved")
+    else:
+        print("\n⚠️  DATA LOSS DETECTED!")
+        print(f"   Backup available at: {backup_path}")
+        print(f"   To restore: cp {backup_path} {args.database}")
+
+    print("\n" + "=" * 70)
+    print(f"Enrichment complete!")
+    print(f"  Found genres:     {found_count}")
+    print(f"  Not found:        {not_found_count}")
+    print(f"  Total processed:  {len(songs)}")
+
+    db.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="WDR Cosmo Playlist Scraper and Analyzer"
@@ -223,6 +303,27 @@ def main():
 
     stats_parser = subparsers.add_parser("stats", help="Show database statistics")
     stats_parser.set_defaults(func=cmd_stats)
+
+    enrich_parser = subparsers.add_parser(
+        "enrich-genres",
+        help="Enrich songs with genre information from MusicBrainz"
+    )
+    enrich_parser.add_argument(
+        "--limit",
+        type=int,
+        help="Limit number of songs to enrich (for testing)"
+    )
+    enrich_parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Skip confirmation prompt"
+    )
+    enrich_parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Show songs where genre was not found"
+    )
+    enrich_parser.set_defaults(func=cmd_enrich_genres)
 
     args = parser.parse_args()
 

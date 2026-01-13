@@ -16,5 +16,8 @@ wheels/
 *.duckdb
 *.duckdb.wal
 
+# Database backups
+backups/
+
 # Inspection samples
 playlist_sample.html

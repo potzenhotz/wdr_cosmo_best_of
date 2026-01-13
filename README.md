@@ -148,6 +148,26 @@ Show database statistics:
 python main.py stats
 ```
 
+### Enrich with Genre Information
+
+Add genre information from MusicBrainz to your songs:
+
+```bash
+# Enrich all songs without genre
+python main.py enrich-genres
+
+# Test with only 10 songs
+python main.py enrich-genres --limit 10
+
+# Skip confirmation prompt
+python main.py enrich-genres -y
+
+# Show verbose output (including songs not found)
+python main.py enrich-genres -v
+```
+
+**Note:** MusicBrainz has a rate limit of 1 request/second, so enriching many songs takes time. The enricher respects this limit automatically.
+
 ### Options
 
 All analysis commands support `--limit` to control the number of results:
@@ -161,13 +181,35 @@ python main.py --database my_playlist.duckdb scrape
 python main.py --database my_playlist.duckdb top-day 2024-01-15
 ```
 
+## Data Protection and Backups
+
+The application includes automatic backup and data integrity verification to protect against data loss:
+
+- **Automatic Backups**: Before any operation that modifies the database (scraping, genre enrichment), a timestamped backup is created in the `backups/` directory
+- **Data Integrity Verification**: After each operation, the system verifies that no data was lost
+- **Backup Location**: `backups/cosmo_playlist_backup_YYYYMMDD_HHMMSS.duckdb`
+
+### Manual Restore
+
+If data loss is detected or you need to restore from a backup:
+
+```bash
+# List available backups
+ls -lh backups/
+
+# Restore from a specific backup
+cp backups/cosmo_playlist_backup_20260113_214057.duckdb cosmo_playlist.duckdb
+```
+
 ## Project Structure
 
 - `main.py` - CLI interface and command handlers
 - `scraper.py` - Web scraping logic for WDR Cosmo playlist
-- `database.py` - DuckDB database management
+- `database.py` - DuckDB database management with backup/verification
 - `analyzer.py` - Data analysis using DuckDB SQL and Polars integration
+- `genre_enricher.py` - MusicBrainz genre enrichment
 - `cosmo_playlist.duckdb` - DuckDB database (created automatically)
+- `backups/` - Automatic database backups (created before each data modification)
 
 ## Database Schema
 
@@ -178,7 +220,10 @@ The `songs` table contains:
 - `time` - Time of day when played (e.g., "17:15")
 - `date` - Date when played (e.g., "2026-01-13")
 - `datetime` - Full timestamp (e.g., "2026-01-13T17:15:00")
+- `musicbrainz_genre` - Genre tags from MusicBrainz (e.g., "electronic, dance, house")
 - `created_at` - When the record was inserted
+
+**Note:** The `musicbrainz_genre` column is named to indicate the source and that it may not be 100% accurate. It's populated by running the `enrich-genres` command.
 
 ## Why DuckDB + Polars?
 
