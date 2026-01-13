@@ -1,0 +1,14 @@
+[project]
+name = "wdr-cosmo-best-of"
+version = "0.1.0"
+description = "WDR Cosmo playlist scraper and analyzer"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "polars[pyarrow]>=0.20.0",
+    "duckdb>=0.10.0",
+]
