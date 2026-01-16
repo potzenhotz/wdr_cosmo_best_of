@@ -44,7 +44,7 @@ class PlaylistDatabase:
         """)
 
 
-    def _create_backup(self, operation_name: str = "") -> Path:
+    def _create_backup(self, operation_name: str = "") -> Optional[Path]:
         """
         Create a backup of the database.
 
@@ -52,35 +52,21 @@ class PlaylistDatabase:
             operation_name: Name of the operation being performed (for backup filename)
 
         Returns:
-            Path to the backup file
+            Path to the backup file or None if backup failed
         """
         if not Path(self.db_path).exists():
-            print("  ⚠ Warning: Database file doesn't exist yet, skipping backup")
+            print("  Warning: Database file doesn't exist yet, skipping backup")
             return None
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = self.backup_dir / f"{Path(self.db_path).stem}_backup_{timestamp}.duckdb"
 
-        # Close connection temporarily to ensure file is not locked
-        was_connected = self.conn is not None
-        if self.conn:
-            self.conn.close()
-
         try:
-            # Copy the database file
             shutil.copy2(self.db_path, backup_path)
-            print(f"✓ Backup created: {backup_path}")
-
-            # Reconnect after backup
-            if was_connected:
-                self.conn = duckdb.connect(self.db_path)
-
+            print(f"Backup created: {backup_path}")
             return backup_path
         except Exception as e:
             print(f"  WARNING: Failed to create backup: {e}")
-            # Reconnect if we closed the connection
-            if not self.conn:
-                self.conn = duckdb.connect(self.db_path)
             return None
 
     def _get_row_count(self) -> int:
@@ -88,7 +74,7 @@ class PlaylistDatabase:
         try:
             result = self.conn.execute("SELECT COUNT(*) FROM songs").fetchone()
             return result[0] if result else 0
-        except:
+        except Exception:
             return 0
 
     def _verify_data_integrity(self, expected_min_rows: int, operation_name: str) -> bool:
@@ -283,45 +269,3 @@ class PlaylistDatabase:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-
-
-def test_database():
-    """Test database functionality."""
-    db = PlaylistDatabase("test_playlist.duckdb")
-
-    test_songs = [
-        {
-            'artist': 'Test Artist 1',
-            'title': 'Test Song 1',
-            'time': '14:30',
-            'date': '2024-01-15',
-            'datetime': '2024-01-15T14:30:00'
-        },
-        {
-            'artist': 'Test Artist 2',
-            'title': 'Test Song 2',
-            'time': '15:45',
-            'date': '2024-01-15',
-            'datetime': '2024-01-15T15:45:00'
-        }
-    ]
-
-    inserted = db.insert_songs(test_songs)
-    print(f"Inserted {inserted} songs")
-
-    total = db.get_total_songs()
-    print(f"Total songs in database: {total}")
-
-    songs = db.get_songs_by_date('2024-01-15')
-    print(f"\nSongs on 2024-01-15:")
-    for song in songs:
-        print(f"  {song['artist']} - {song['title']} at {song['time']}")
-
-    db.close()
-
-    Path("test_playlist.duckdb").unlink(missing_ok=True)
-    print("\nTest database deleted")
-
-
-if __name__ == "__main__":
-    test_database()

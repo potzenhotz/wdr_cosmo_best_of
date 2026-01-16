@@ -9,18 +9,16 @@ import os
 import re
 import requests
 import time
-from typing import Optional, List
+from typing import Optional, List, Callable
 from dotenv import load_dotenv
-from rapidfuzz import fuzz
 
-# Load environment variables from .env file
 load_dotenv()
 
 
 class LastFmGenreEnricher:
     BASE_URL = "https://ws.audioscrobbler.com/2.0/"
-    RATE_LIMIT_DELAY = 0.2  # 5 requests per second allowed
-    MIN_FUZZY_SCORE = 50.0
+    RATE_LIMIT_DELAY = 0.2  # 5 requests per second
+    MAX_TAGS = 3  # Number of tags to return
 
     # Patterns to strip from titles for better matching
     TITLE_STRIP_PATTERNS = [
@@ -89,36 +87,30 @@ class LastFmGenreEnricher:
                 return artist[:idx].strip()
         return artist.strip()
 
-    def _get_track_tags(self, artist: str, title: str) -> Optional[List[str]]:
+    def _fetch_tags(self, params: dict) -> Optional[List[str]]:
         """
-        Get top tags for a track from Last.fm.
+        Fetch tags from Last.fm API.
 
-        Returns list of tag names or None if not found.
+        Args:
+            params: API parameters (method, artist, track, etc.)
+
+        Returns:
+            List of tag names or None if not found
         """
         self._rate_limit()
 
         try:
-            params = {
-                'method': 'track.getTopTags',
-                'artist': artist,
-                'track': title,
-                'api_key': self.api_key,
-                'format': 'json'
-            }
-
+            params.update({'api_key': self.api_key, 'format': 'json'})
             response = self.session.get(self.BASE_URL, params=params, timeout=10)
             response.raise_for_status()
-
             data = response.json()
 
-            # Check for errors
             if 'error' in data:
                 if self.verbose:
                     print(f"    -> Last.fm error: {data.get('message', 'Unknown error')}")
                 return None
 
             tags = data.get('toptags', {}).get('tag', [])
-
             if not tags:
                 return None
 
@@ -126,137 +118,63 @@ class LastFmGenreEnricher:
             if isinstance(tags, dict):
                 tags = [tags]
 
-            # Filter out low-count tags and return names
             return [tag['name'] for tag in tags if int(tag.get('count', 0)) > 0][:5]
 
-        except requests.RequestException as e:
+        except (requests.RequestException, KeyError, ValueError) as e:
             if self.verbose:
-                print(f"    -> Request error: {e}")
+                print(f"    -> Error: {e}")
             return None
-        except (KeyError, ValueError) as e:
-            if self.verbose:
-                print(f"    -> Parse error: {e}")
-            return None
+
+    def _get_track_tags(self, artist: str, title: str) -> Optional[List[str]]:
+        """Get top tags for a track from Last.fm."""
+        return self._fetch_tags({'method': 'track.getTopTags', 'artist': artist, 'track': title})
 
     def _get_artist_tags(self, artist: str) -> Optional[List[str]]:
-        """
-        Get top tags for an artist from Last.fm.
-
-        Fallback when track tags are not available.
-        """
-        self._rate_limit()
-
-        try:
-            params = {
-                'method': 'artist.getTopTags',
-                'artist': artist,
-                'api_key': self.api_key,
-                'format': 'json'
-            }
-
-            response = self.session.get(self.BASE_URL, params=params, timeout=10)
-            response.raise_for_status()
-
-            data = response.json()
-
-            if 'error' in data:
-                if self.verbose:
-                    print(f"    -> Last.fm artist error: {data.get('message', 'Unknown error')}")
-                return None
-
-            tags = data.get('toptags', {}).get('tag', [])
-
-            if not tags:
-                return None
-
-            if isinstance(tags, dict):
-                tags = [tags]
-
-            return [tag['name'] for tag in tags if int(tag.get('count', 0)) > 0][:5]
-
-        except requests.RequestException as e:
-            if self.verbose:
-                print(f"    -> Artist request error: {e}")
-            return None
-        except (KeyError, ValueError) as e:
-            if self.verbose:
-                print(f"    -> Artist parse error: {e}")
-            return None
+        """Get top tags for an artist from Last.fm (fallback)."""
+        return self._fetch_tags({'method': 'artist.getTopTags', 'artist': artist})
 
     def _format_tags(self, tags: List[str]) -> str:
         """Format tag list as comma-separated string."""
-        return ', '.join(tags[:3])
+        return ', '.join(tags[:self.MAX_TAGS])
 
     def lookup_genre(self, artist: str, title: str) -> Optional[str]:
         """
         Look up genre/tags for a song from Last.fm.
 
-        Strategy:
-        1. Try exact artist + title
-        2. Try with cleaned title (strip remix, edit, etc.)
-        3. Try primary artist only + title
-        4. Try primary artist only + cleaned title
-        5. Fallback to artist tags
-
-        Args:
-            artist: Artist name
-            title: Song title
-
-        Returns:
-            Genre/tags string (comma-separated) or None if not found
+        Tries multiple strategies: exact match, cleaned title, primary artist.
+        Falls back to artist tags if track tags not found.
         """
         if self.verbose:
             print(f"  Looking up: {artist} - {title}")
 
-        # Strategy 1: Exact match
-        tags = self._get_track_tags(artist, title)
-        if tags:
-            if self.verbose:
-                print(f"    -> Found track tags (exact)")
-            return self._format_tags(tags)
-
-        # Strategy 2: Cleaned title
         cleaned_title = self._clean_title(title)
-        if cleaned_title != title:
-            if self.verbose:
-                print(f"    -> Trying cleaned title: '{cleaned_title}'")
-            tags = self._get_track_tags(artist, cleaned_title)
-            if tags:
-                if self.verbose:
-                    print(f"    -> Found track tags (cleaned title)")
-                return self._format_tags(tags)
-
-        # Strategy 3: Primary artist + original title
         primary_artist = self._extract_primary_artist(artist)
+
+        # Build list of (artist, title) combinations to try
+        strategies = [(artist, title)]
+        if cleaned_title != title:
+            strategies.append((artist, cleaned_title))
         if primary_artist != artist:
-            if self.verbose:
-                print(f"    -> Trying primary artist: '{primary_artist}'")
-            tags = self._get_track_tags(primary_artist, title)
-            if tags:
+            strategies.append((primary_artist, title))
+            if cleaned_title != title:
+                strategies.append((primary_artist, cleaned_title))
+
+        # Try each strategy
+        for a, t in strategies:
+            if tags := self._get_track_tags(a, t):
                 if self.verbose:
-                    print(f"    -> Found track tags (primary artist)")
+                    print(f"    -> Found tags for '{a}' - '{t}'")
                 return self._format_tags(tags)
 
-            # Strategy 4: Primary artist + cleaned title
-            if cleaned_title != title:
-                tags = self._get_track_tags(primary_artist, cleaned_title)
-                if tags:
-                    if self.verbose:
-                        print(f"    -> Found track tags (primary artist + cleaned title)")
-                    return self._format_tags(tags)
-
-        # Strategy 5: Artist tags fallback
-        if self.verbose:
-            print(f"    -> Trying artist tags fallback")
-
-        tags = self._get_artist_tags(primary_artist if primary_artist != artist else artist)
-        if tags:
+        # Fallback to artist tags
+        fallback_artist = primary_artist if primary_artist != artist else artist
+        if tags := self._get_artist_tags(fallback_artist):
             if self.verbose:
-                print(f"    -> Found artist tags")
+                print(f"    -> Found artist tags for '{fallback_artist}'")
             return self._format_tags(tags)
 
         if self.verbose:
-            print(f"    -> FAILED: No tags found")
+            print(f"    -> No tags found")
 
         return None
 
@@ -316,51 +234,3 @@ class LastFmGenreEnricher:
             print(f"\nNot-found songs logged to: {not_found_log}")
 
         return stats
-
-
-def test_enricher():
-    """Test the Last.fm genre enricher."""
-    api_key = os.environ.get('LASTFM_API_KEY')
-    if not api_key:
-        print("Set LASTFM_API_KEY environment variable to test")
-        print("Get a free key at: https://www.last.fm/api/account/create")
-        return
-
-    enricher = LastFmGenreEnricher(api_key=api_key, verbose=True)
-
-    test_songs = [
-        # Simple cases
-        {'artist': 'Daft Punk', 'title': 'Get Lucky'},
-        {'artist': 'Radiohead', 'title': 'Creep'},
-        # Multi-artist cases
-        {'artist': 'Dua Lipa feat. DaBaby', 'title': 'Levitating'},
-        {'artist': 'David Guetta & Sia', 'title': 'Titanium'},
-        # The problematic ones from MusicBrainz
-        {'artist': 'Aya Nakamura', 'title': 'Pookie'},
-        {'artist': 'Aya Nakamura', 'title': 'Jolie nana'},
-        {'artist': 'Aya Nakamura & Kali Uchis', 'title': 'Baby boy'},
-        # Title with suffix
-        {'artist': 'The Weeknd', 'title': 'Blinding Lights (Radio Edit)'},
-        # Unknown (should return None)
-        {'artist': 'Unknown Artist 12345', 'title': 'Unknown Song 67890'}
-    ]
-
-    print("Testing Last.fm Genre Enricher")
-    print("=" * 60)
-
-    found = 0
-    for song in test_songs:
-        print(f"\n{song['artist']} - {song['title']}")
-        genre = enricher.lookup_genre(song['artist'], song['title'])
-        if genre:
-            found += 1
-            print(f"  => {genre}")
-        else:
-            print(f"  => NOT FOUND")
-
-    print("\n" + "=" * 60)
-    print(f"Results: {found}/{len(test_songs)} songs found")
-
-
-if __name__ == "__main__":
-    test_enricher()

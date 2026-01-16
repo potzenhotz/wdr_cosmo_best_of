@@ -13,21 +13,15 @@ DASH_LINE = "-" * 70
 
 
 # Helper functions
-def _print_top_songs(songs, title: str, limit: int):
-    """Print top songs in standardized format."""
+def _print_ranked_list(data, title: str, limit: int, include_title: bool = True):
+    """Print ranked list in standardized format."""
     print(f"\nTop {limit} {title}:")
     print(DASH_LINE)
-    for i, row in enumerate(songs.iter_rows(named=True), start=1):
-        print(f"{i:2d}. {row['artist']} - {row['title']}")
-        print(f"    Played {row['play_count']} times")
-
-
-def _print_top_artists(artists, title: str, limit: int):
-    """Print top artists in standardized format."""
-    print(f"\nTop {limit} {title}:")
-    print(DASH_LINE)
-    for i, row in enumerate(artists.iter_rows(named=True), start=1):
-        print(f"{i:2d}. {row['artist']}")
+    for i, row in enumerate(data.iter_rows(named=True), start=1):
+        if include_title:
+            print(f"{i:2d}. {row['artist']} - {row['title']}")
+        else:
+            print(f"{i:2d}. {row['artist']}")
         print(f"    Played {row['play_count']} times")
 
 
@@ -79,7 +73,7 @@ def cmd_top_day(args):
     """Show top songs for a specific day."""
     analyzer = PlaylistAnalyzer(args.database)
     top_songs = analyzer.top_songs_by_day(args.date, args.limit)
-    _print_top_songs(top_songs, f"songs on {args.date}", args.limit)
+    _print_ranked_list(top_songs, f"songs on {args.date}", args.limit)
 
 
 def cmd_top_week(args):
@@ -88,14 +82,14 @@ def cmd_top_week(args):
     top_songs = analyzer.top_songs_by_week(args.start_date, args.limit)
 
     end_date = datetime.strptime(args.start_date, "%Y-%m-%d") + timedelta(days=6)
-    _print_top_songs(top_songs, f"songs for week {args.start_date} to {end_date.strftime('%Y-%m-%d')}", args.limit)
+    _print_ranked_list(top_songs, f"songs for week {args.start_date} to {end_date.strftime('%Y-%m-%d')}", args.limit)
 
 
 def cmd_top_month(args):
     """Show top songs for a month."""
     analyzer = PlaylistAnalyzer(args.database)
     top_songs = analyzer.top_songs_by_month(args.year, args.month, args.limit)
-    _print_top_songs(top_songs, f"songs for {args.year}-{args.month:02d}", args.limit)
+    _print_ranked_list(top_songs, f"songs for {args.year}-{args.month:02d}", args.limit)
 
 
 def cmd_top_range(args):
@@ -106,7 +100,7 @@ def cmd_top_range(args):
         args.end_date,
         args.limit
     )
-    _print_top_songs(top_songs, f"songs from {args.start_date} to {args.end_date}", args.limit)
+    _print_ranked_list(top_songs, f"songs from {args.start_date} to {args.end_date}", args.limit)
 
 
 def cmd_top_artists(args):
@@ -118,7 +112,7 @@ def cmd_top_artists(args):
         args.limit
     )
     date_info = _format_date_range(args.start_date, args.end_date, default_text="")
-    _print_top_artists(top_artists, f"artists{date_info}", args.limit)
+    _print_ranked_list(top_artists, f"artists{date_info}", args.limit, include_title=False)
 
 
 def cmd_top_songs(args):
@@ -130,7 +124,7 @@ def cmd_top_songs(args):
         args.limit
     )
     date_info = _format_date_range(args.start_date, args.end_date)
-    _print_top_songs(top_songs, f"songs{date_info}", args.limit)
+    _print_ranked_list(top_songs, f"songs{date_info}", args.limit)
 
 
 def cmd_stats(args):

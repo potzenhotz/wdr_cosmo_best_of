@@ -210,21 +210,3 @@ class CosmoPlaylistScraper:
             current_date += timedelta(days=1)
 
         return all_songs
-
-
-def test_scraper():
-    """Test function to check scraper output."""
-    scraper = CosmoPlaylistScraper()
-
-    print("Testing scraper with today's playlist...")
-    songs = scraper.fetch_playlist()
-
-    print(f"\nFound {len(songs)} songs")
-    if songs:
-        print("\nFirst song:")
-        for key, value in songs[0].items():
-            print(f"  {key}: {value}")
-
-
-if __name__ == "__main__":
-    test_scraper()

@@ -267,17 +267,3 @@ class PlaylistAnalyzer:
                 "latest_date": latest.strftime("%Y-%m-%d") if latest else None,
                 "days_covered": days,
             }
-
-
-def test_analyzer():
-    """Test analyzer functionality."""
-    analyzer = PlaylistAnalyzer("test_playlist.duckdb")
-
-    stats = analyzer.get_statistics()
-    print("Statistics:")
-    for key, value in stats.items():
-        print(f"  {key}: {value}")
-
-
-if __name__ == "__main__":
-    test_analyzer()
