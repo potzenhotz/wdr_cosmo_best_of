@@ -11,4 +11,6 @@ dependencies = [
     "lxml>=5.0.0",
     "polars[pyarrow]>=0.20.0",
     "duckdb>=0.10.0",
+    "rapidfuzz>=3.0.0",
+    "python-dotenv>=1.0.0",
 ]

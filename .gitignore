@@ -21,3 +21,6 @@ backups/
 
 # Inspection samples
 playlist_sample.html
+
+# Environment variables
+.env

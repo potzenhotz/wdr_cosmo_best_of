@@ -25,7 +25,7 @@ class PlaylistDatabase:
                 time VARCHAR,
                 date DATE NOT NULL,
                 datetime TIMESTAMP,
-                musicbrainz_genre VARCHAR,
+                genre VARCHAR,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(artist, title, datetime)
             )
@@ -42,6 +42,7 @@ class PlaylistDatabase:
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_datetime ON songs(datetime)
         """)
+
 
     def _create_backup(self, operation_name: str = "") -> Path:
         """
@@ -222,7 +223,7 @@ class PlaylistDatabase:
 
         result = self.conn.execute("""
             UPDATE songs
-            SET musicbrainz_genre = ?
+            SET genre = ?
             WHERE artist = ? AND title = ?
         """, [genre, artist, title])
 
@@ -245,7 +246,7 @@ class PlaylistDatabase:
         query = """
             SELECT DISTINCT artist, title
             FROM songs
-            WHERE musicbrainz_genre IS NULL
+            WHERE genre IS NULL
             ORDER BY artist, title
         """
 
@@ -255,6 +256,22 @@ class PlaylistDatabase:
         result = self.conn.execute(query).fetchall()
         columns = ['artist', 'title']
         return [dict(zip(columns, row)) for row in result]
+
+    def clear_all_genres(self) -> int:
+        """
+        Clear all genre information for a fresh start.
+
+        Returns:
+            Number of rows updated
+        """
+        self._create_backup("clear_genres")
+
+        # Count rows with genre before clearing
+        count = self.conn.execute("SELECT COUNT(*) FROM songs WHERE genre IS NOT NULL").fetchone()[0]
+
+        self.conn.execute("UPDATE songs SET genre = NULL")
+        print(f"Cleared genres from {count} songs")
+        return count
 
     def close(self):
         """Close database connection."""

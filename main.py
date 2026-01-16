@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from scraper import CosmoPlaylistScraper
 from database import PlaylistDatabase
 from analyzer import PlaylistAnalyzer
-from genre_enricher import MusicBrainzGenreEnricher
+from genre_enricher import LastFmGenreEnricher
 
 
 # Constants
@@ -151,9 +151,27 @@ def cmd_stats(args):
 
 
 def cmd_enrich_genres(args):
-    """Enrich songs with genre information from MusicBrainz."""
+    """Enrich songs with genre information from Last.fm."""
+    import os
+    from dotenv import load_dotenv
+
+    # Load .env file
+    load_dotenv()
+
     db = PlaylistDatabase(args.database)
-    enricher = MusicBrainzGenreEnricher()
+
+    # Check for API key
+    api_key = os.environ.get('LASTFM_API_KEY')
+    if not api_key:
+        print("ERROR: LASTFM_API_KEY not found!")
+        print("Get a free API key at: https://www.last.fm/api/account/create")
+        print("\nThen add it to your .env file:")
+        print("  cp .env.example .env")
+        print("  # Edit .env and add your API key")
+        db.close()
+        return
+
+    enricher = LastFmGenreEnricher(api_key=api_key, verbose=args.verbose)
 
     # Check if there are any songs in the database
     total_songs = db.get_total_songs()
@@ -172,8 +190,9 @@ def cmd_enrich_genres(args):
         return
 
     print(f"Found {len(songs)} unique songs without genre information")
-    print(f"Note: MusicBrainz rate limit is 1 request/second")
-    print(f"Estimated time: ~{len(songs)} seconds (~{len(songs) // 60} minutes)\n")
+    print(f"Note: Last.fm rate limit is 5 requests/second")
+    est_seconds = len(songs) // 5
+    print(f"Estimated time: ~{est_seconds} seconds (~{est_seconds // 60} minutes)\n")
 
     if not args.yes:
         response = input(f"Proceed with enriching {len(songs)} songs? [y/N]: ")
@@ -226,6 +245,31 @@ def cmd_enrich_genres(args):
     print(f"  Not found:        {not_found_count}")
     print(f"  Total processed:  {len(songs)}")
 
+    db.close()
+
+
+def cmd_clear_genres(args):
+    """Clear all genre information for a fresh start."""
+    db = PlaylistDatabase(args.database)
+
+    total_songs = db.get_total_songs()
+    if total_songs == 0:
+        print("No songs in database!")
+        db.close()
+        return
+
+    print(f"This will clear genre information from ALL {total_songs} songs.")
+    print("A backup will be created before clearing.\n")
+
+    if not args.yes:
+        response = input("Proceed? [y/N]: ")
+        if response.lower() not in ['y', 'yes']:
+            print("Aborted.")
+            db.close()
+            return
+
+    db.clear_all_genres()
+    print("Done! You can now run 'enrich-genres' to fetch fresh genre data.")
     db.close()
 
 
@@ -320,7 +364,7 @@ def main():
 
     enrich_parser = subparsers.add_parser(
         "enrich-genres",
-        help="Enrich songs with genre information from MusicBrainz"
+        help="Enrich songs with genre information from Last.fm"
     )
     enrich_parser.add_argument(
         "--limit",
@@ -338,6 +382,17 @@ def main():
         help="Show songs where genre was not found"
     )
     enrich_parser.set_defaults(func=cmd_enrich_genres)
+
+    clear_parser = subparsers.add_parser(
+        "clear-genres",
+        help="Clear all genre information for a fresh start"
+    )
+    clear_parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Skip confirmation prompt"
+    )
+    clear_parser.set_defaults(func=cmd_clear_genres)
 
     args = parser.parse_args()
 
