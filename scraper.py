@@ -35,8 +35,11 @@ class CosmoPlaylistScraper:
         all_songs = []
         seen_songs = set()  # Track (artist, title, time) to avoid duplicates within day
 
-        # Query every hour (00:00, 01:00, 02:00, ..., 23:00)
-        for hour in range(24):
+        # Skip future hours when querying today
+        is_today = date.date() == datetime.now().date()
+        max_hour = datetime.now().hour + 1 if is_today else 24
+
+        for hour in range(max_hour):
             print(f"    Querying {hour:02d}:00 (±30 min window)...", end='', flush=True)
             songs = self._fetch_playlist_for_time(date, hour, 0)
 
