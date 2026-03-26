@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from scraper import CosmoPlaylistScraper
 from database import PlaylistDatabase
 from analyzer import PlaylistAnalyzer
+from spotify_client import SpotifyClient
 from genre_enricher import LastFmGenreEnricher
 
 
@@ -145,7 +146,7 @@ def cmd_stats(args):
 
 
 def cmd_enrich_genres(args):
-    """Enrich songs with genre information from Last.fm."""
+    """Enrich songs with genre info (Last.fm) and Spotify track IDs."""
     import os
     from dotenv import load_dotenv
 
@@ -154,19 +155,6 @@ def cmd_enrich_genres(args):
 
     db = PlaylistDatabase(args.database)
 
-    # Check for API key
-    api_key = os.environ.get('LASTFM_API_KEY')
-    if not api_key:
-        print("ERROR: LASTFM_API_KEY not found!")
-        print("Get a free API key at: https://www.last.fm/api/account/create")
-        print("\nThen add it to your .env file:")
-        print("  cp .env.example .env")
-        print("  # Edit .env and add your API key")
-        db.close()
-        return
-
-    enricher = LastFmGenreEnricher(api_key=api_key, verbose=args.verbose)
-
     # Check if there are any songs in the database
     total_songs = db.get_total_songs()
     if total_songs == 0:
@@ -174,16 +162,49 @@ def cmd_enrich_genres(args):
         db.close()
         return
 
-    # Get songs without genre
-    print("Finding songs without genre information...")
-    songs = db.get_songs_without_genre(limit=args.limit)
-
-    if not songs:
-        print("All songs already have genre information!")
+    # Initialize Last.fm (required for genres)
+    api_key = os.environ.get('LASTFM_API_KEY')
+    if not api_key:
+        print("ERROR: LASTFM_API_KEY not found!")
+        print("Get a free API key at: https://www.last.fm/api/account/create")
+        print("\nThen add it to your .env file:")
+        print("  LASTFM_API_KEY=your_api_key")
         db.close()
         return
 
-    print(f"Found {len(songs)} unique songs without genre information")
+    lastfm = LastFmGenreEnricher(api_key=api_key, verbose=args.verbose)
+
+    # Initialize Spotify (optional, for track IDs)
+    spotify = None
+    try:
+        spotify = SpotifyClient(verbose=args.verbose)
+        print("Spotify connected - will also store track IDs for playlist export")
+    except ValueError as e:
+        print(f"Spotify not available ({e})")
+        print("Continuing with Last.fm for genres only (no playlist export)\n")
+
+    # Get songs without genre (or Spotify ID for retry)
+    if args.retry:
+        print("Finding songs to retry (including NOT_FOUND)...")
+        songs = db.get_songs_without_genre(limit=args.limit, include_not_found=True)
+        not_found_count = db.get_not_found_count()
+        print(f"  ({not_found_count} previously marked as NOT_FOUND)")
+    else:
+        print("Finding songs without genre information...")
+        songs = db.get_songs_without_genre(limit=args.limit)
+
+    if not songs:
+        not_found_count = db.get_not_found_count()
+        if not_found_count > 0:
+            print(f"All new songs have been processed! ({not_found_count} marked as NOT_FOUND)")
+            print("Use --retry to retry NOT_FOUND songs.")
+        else:
+            print("All songs already have genre information!")
+        db.close()
+        return
+
+    print(f"Found {len(songs)} unique songs to process")
+    print(f"Using Last.fm for genres{', Spotify for track IDs' if spotify else ''}")
     print(f"Note: Last.fm rate limit is 5 requests/second")
     est_seconds = len(songs) // 5
     print(f"Estimated time: ~{est_seconds} seconds (~{est_seconds // 60} minutes)\n")
@@ -204,24 +225,41 @@ def cmd_enrich_genres(args):
     print("\nEnriching genres...")
     print(SEPARATOR)
 
-    found_count = 0
+    genre_found = 0
+    spotify_found = 0
     not_found_count = 0
 
-    def progress_callback(current, total, artist, title, genre):
-        nonlocal found_count, not_found_count
+    for i, song in enumerate(songs, 1):
+        artist = song['artist']
+        title = song['title']
+
+        # Get genre from Last.fm
+        genre = lastfm.lookup_genre(artist, title)
+
+        # Get Spotify track ID (if Spotify is available)
+        spotify_id = None
+        if spotify:
+            track = spotify.search_track(artist, title)
+            if track:
+                spotify_id = track['track_id']
 
         if genre:
-            found_count += 1
-            print(f"[{current}/{total}] ✓ {artist} - {title}")
-            print(f"         Genre: {genre}")
-            # Skip backup for individual updates during batch operation
-            db.update_genre(artist, title, genre, skip_backup=True)
+            genre_found += 1
+            if spotify_id:
+                spotify_found += 1
+            print(f"[{i}/{len(songs)}] ✓ {artist} - {title}")
+            print(f"         Genre: {genre}{' | Spotify ✓' if spotify_id else ''}")
+            db.update_genre_and_spotify_id(artist, title, genre, spotify_id, skip_backup=True)
         else:
             not_found_count += 1
+            if spotify_id:
+                spotify_found += 1
+                # No genre but have Spotify ID - store it with NOT_FOUND genre
+                db.update_genre_and_spotify_id(artist, title, "NOT_FOUND", spotify_id, skip_backup=True)
+            else:
+                db.update_genre_and_spotify_id(artist, title, "NOT_FOUND", None, skip_backup=True)
             if args.verbose:
-                print(f"[{current}/{total}] ✗ {artist} - {title} (not found)")
-
-    enricher.enrich_songs(songs, on_progress=progress_callback)
+                print(f"[{i}/{len(songs)}] ✗ {artist} - {title} (no genre{' | Spotify ✓' if spotify_id else ''})")
 
     # Verify data integrity after batch enrichment
     print(f"\n{SEPARATOR}")
@@ -235,9 +273,96 @@ def cmd_enrich_genres(args):
 
     print(f"\n{SEPARATOR}")
     print(f"Enrichment complete!")
-    print(f"  Found genres:     {found_count}")
-    print(f"  Not found:        {not_found_count}")
-    print(f"  Total processed:  {len(songs)}")
+    print(f"  Genres found (Last.fm): {genre_found}")
+    print(f"  Spotify track IDs:      {spotify_found}")
+    print(f"  Not found:              {not_found_count}")
+    print(f"  Total processed:        {len(songs)}")
+
+    db.close()
+
+
+def cmd_export_playlist(args):
+    """Export top songs to a Spotify playlist."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    db = PlaylistDatabase(args.database)
+
+    # Initialize Spotify client
+    try:
+        spotify = SpotifyClient(verbose=args.verbose if hasattr(args, 'verbose') else False)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        db.close()
+        return
+
+    # Determine playlist name and query parameters
+    playlist_name = args.name
+    description = "Generated from WDR Cosmo playlist data"
+
+    if args.week:
+        week_start = args.week
+        week_end = (datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=6)).strftime("%Y-%m-%d")
+        if not playlist_name:
+            playlist_name = f"Cosmo Week {week_start}"
+        description = f"Top songs from WDR Cosmo, week of {week_start} to {week_end}"
+        songs = db.get_top_songs_with_spotify_ids(limit=args.limit, week_start=week_start)
+    elif args.month:
+        if not playlist_name:
+            playlist_name = f"Cosmo {args.month}"
+        description = f"Top songs from WDR Cosmo, {args.month}"
+        songs = db.get_top_songs_with_spotify_ids(limit=args.limit, month=args.month)
+    elif args.genre:
+        if not playlist_name:
+            playlist_name = f"Cosmo {args.genre.title()}"
+        description = f"Top {args.genre} songs from WDR Cosmo"
+        songs = db.get_top_songs_with_spotify_ids(limit=args.limit, genre_filter=args.genre)
+    elif args.top:
+        if not playlist_name:
+            playlist_name = "Cosmo All-Time Top"
+        description = "All-time top songs from WDR Cosmo"
+        songs = db.get_top_songs_with_spotify_ids(limit=args.limit)
+    else:
+        print("ERROR: Please specify one of: --week, --month, --genre, or --top")
+        db.close()
+        return
+
+    if not songs:
+        print("No songs found with Spotify IDs matching your criteria.")
+        print("Run 'enrich-genres' first to link songs to Spotify.")
+        db.close()
+        return
+
+    print(f"Creating playlist: {playlist_name}")
+    print(f"Songs to add: {len(songs)}")
+    print(DASH_LINE)
+
+    for i, song in enumerate(songs[:10], 1):
+        print(f"  {i}. {song['artist']} - {song['title']} ({song['play_count']} plays)")
+
+    if len(songs) > 10:
+        print(f"  ... and {len(songs) - 10} more")
+
+    print()
+
+    if not args.yes:
+        response = input("Create this playlist on Spotify? [y/N]: ")
+        if response.lower() not in ['y', 'yes']:
+            print("Aborted.")
+            db.close()
+            return
+
+    # Extract track IDs and create playlist
+    track_ids = [song['spotify_track_id'] for song in songs]
+
+    try:
+        playlist_url = spotify.create_playlist(playlist_name, track_ids, description)
+        print(f"\n✓ Playlist created successfully!")
+        print(f"  URL: {playlist_url}")
+        print(f"  Songs added: {len(track_ids)}")
+    except Exception as e:
+        print(f"\nERROR creating playlist: {e}")
 
     db.close()
 
@@ -358,7 +483,7 @@ def main():
 
     enrich_parser = subparsers.add_parser(
         "enrich-genres",
-        help="Enrich songs with genre information from Last.fm"
+        help="Enrich songs with genre information from Spotify"
     )
     enrich_parser.add_argument(
         "--limit",
@@ -375,6 +500,11 @@ def main():
         action="store_true",
         help="Show songs where genre was not found"
     )
+    enrich_parser.add_argument(
+        "--retry",
+        action="store_true",
+        help="Retry songs previously marked as NOT_FOUND"
+    )
     enrich_parser.set_defaults(func=cmd_enrich_genres)
 
     clear_parser = subparsers.add_parser(
@@ -387,6 +517,45 @@ def main():
         help="Skip confirmation prompt"
     )
     clear_parser.set_defaults(func=cmd_clear_genres)
+
+    export_parser = subparsers.add_parser(
+        "export-playlist",
+        help="Export top songs to a Spotify playlist"
+    )
+    export_group = export_parser.add_mutually_exclusive_group()
+    export_group.add_argument(
+        "--week",
+        help="Export top songs for a week (YYYY-MM-DD start date)"
+    )
+    export_group.add_argument(
+        "--month",
+        help="Export top songs for a month (YYYY-MM)"
+    )
+    export_group.add_argument(
+        "--genre",
+        help="Export top songs by genre"
+    )
+    export_group.add_argument(
+        "--top",
+        action="store_true",
+        help="Export all-time top songs"
+    )
+    export_parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Number of songs to include (default: 50)"
+    )
+    export_parser.add_argument(
+        "--name",
+        help="Custom playlist name"
+    )
+    export_parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Skip confirmation prompt"
+    )
+    export_parser.set_defaults(func=cmd_export_playlist)
 
     args = parser.parse_args()
 

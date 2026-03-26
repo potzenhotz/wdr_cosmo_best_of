@@ -12,4 +12,5 @@ dependencies = [
     "polars[pyarrow]>=0.20.0",
     "duckdb>=0.10.0",
     "python-dotenv>=1.0.0",
+    "spotipy>=2.23.0",
 ]

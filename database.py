@@ -43,6 +43,24 @@ class PlaylistDatabase:
             CREATE INDEX IF NOT EXISTS idx_datetime ON songs(datetime)
         """)
 
+        # Migration: Add spotify_track_id column if it doesn't exist
+        self._migrate_add_spotify_track_id()
+
+    def _migrate_add_spotify_track_id(self):
+        """Add spotify_track_id column if it doesn't exist."""
+        try:
+            # Check if column exists
+            result = self.conn.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'songs' AND column_name = 'spotify_track_id'
+            """).fetchone()
+
+            if not result:
+                self.conn.execute("ALTER TABLE songs ADD COLUMN spotify_track_id VARCHAR")
+                print("Database migration: Added spotify_track_id column")
+        except Exception as e:
+            # Column might already exist or other error
+            pass
 
     def _create_backup(self, operation_name: str = "") -> Optional[Path]:
         """
@@ -219,20 +237,28 @@ class PlaylistDatabase:
 
         return result.fetchone()[0] if result else 0
 
-    def get_songs_without_genre(self, limit: Optional[int] = None) -> List[Dict]:
+    def get_songs_without_genre(self, limit: Optional[int] = None, include_not_found: bool = False) -> List[Dict]:
         """
         Get distinct songs that don't have genre information.
 
         Args:
             limit: Optional limit on number of songs to return
+            include_not_found: If True, also include songs marked as NOT_FOUND (for retry)
 
         Returns:
             List of dictionaries with artist and title
         """
-        query = """
+        if include_not_found:
+            # Include both NULL (never tried) and NOT_FOUND (retry)
+            where_clause = "WHERE genre IS NULL OR genre = 'NOT_FOUND'"
+        else:
+            # Only songs never tried
+            where_clause = "WHERE genre IS NULL"
+
+        query = f"""
             SELECT DISTINCT artist, title
             FROM songs
-            WHERE genre IS NULL
+            {where_clause}
             ORDER BY artist, title
         """
 
@@ -242,6 +268,13 @@ class PlaylistDatabase:
         result = self.conn.execute(query).fetchall()
         columns = ['artist', 'title']
         return [dict(zip(columns, row)) for row in result]
+
+    def get_not_found_count(self) -> int:
+        """Get count of songs marked as NOT_FOUND."""
+        result = self.conn.execute(
+            "SELECT COUNT(DISTINCT artist || '|||' || title) FROM songs WHERE genre = 'NOT_FOUND'"
+        ).fetchone()
+        return result[0] if result else 0
 
     def clear_all_genres(self) -> int:
         """
@@ -258,6 +291,152 @@ class PlaylistDatabase:
         self.conn.execute("UPDATE songs SET genre = NULL")
         print(f"Cleared genres from {count} songs")
         return count
+
+    def update_spotify_track_id(self, artist: str, title: str, spotify_track_id: str, skip_backup: bool = False) -> int:
+        """
+        Update Spotify track ID for all occurrences of a song.
+
+        Args:
+            artist: Artist name
+            title: Song title
+            spotify_track_id: Spotify track ID
+            skip_backup: If True, skip backup (useful for batch operations)
+
+        Returns:
+            Number of rows updated
+        """
+        if not skip_backup:
+            rows_before = self._get_row_count()
+            self._create_backup("update_spotify_track_id")
+
+        result = self.conn.execute("""
+            UPDATE songs
+            SET spotify_track_id = ?
+            WHERE artist = ? AND title = ?
+        """, [spotify_track_id, artist, title])
+
+        if not skip_backup:
+            self._verify_data_integrity(rows_before, "update_spotify_track_id")
+
+        return result.fetchone()[0] if result else 0
+
+    def update_genre_and_spotify_id(self, artist: str, title: str, genre: str, spotify_track_id: Optional[str], skip_backup: bool = False) -> int:
+        """
+        Update both genre and Spotify track ID for all occurrences of a song.
+
+        Args:
+            artist: Artist name
+            title: Song title
+            genre: Genre to set
+            spotify_track_id: Spotify track ID (can be None)
+            skip_backup: If True, skip backup (useful for batch operations)
+
+        Returns:
+            Number of rows updated
+        """
+        if not skip_backup:
+            rows_before = self._get_row_count()
+            self._create_backup("update_genre_and_spotify_id")
+
+        result = self.conn.execute("""
+            UPDATE songs
+            SET genre = ?, spotify_track_id = ?
+            WHERE artist = ? AND title = ?
+        """, [genre, spotify_track_id, artist, title])
+
+        if not skip_backup:
+            self._verify_data_integrity(rows_before, "update_genre_and_spotify_id")
+
+        return result.fetchone()[0] if result else 0
+
+    def get_top_songs_with_spotify_ids(
+        self,
+        limit: int = 50,
+        week_start: Optional[str] = None,
+        month: Optional[str] = None,
+        genre_filter: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Get top songs that have Spotify track IDs for playlist export.
+
+        Args:
+            limit: Maximum number of songs to return
+            week_start: Week start date (YYYY-MM-DD) for weekly filter
+            month: Month (YYYY-MM) for monthly filter
+            genre_filter: Filter by genre (substring match)
+
+        Returns:
+            List of dicts with artist, title, play_count, spotify_track_id
+        """
+        conditions = ["spotify_track_id IS NOT NULL"]
+        params = []
+
+        if week_start:
+            # Week is 7 days starting from week_start
+            conditions.append("date >= CAST(? AS DATE)")
+            conditions.append("date < CAST(? AS DATE) + INTERVAL 7 DAY")
+            params.extend([week_start, week_start])
+        elif month:
+            # Month filter (YYYY-MM format)
+            conditions.append("strftime('%Y-%m', date) = ?")
+            params.append(month)
+
+        if genre_filter:
+            conditions.append("LOWER(genre) LIKE ?")
+            params.append(f"%{genre_filter.lower()}%")
+
+        where_clause = " AND ".join(conditions)
+
+        query = f"""
+            SELECT artist, title, COUNT(*) as play_count, spotify_track_id
+            FROM songs
+            WHERE {where_clause}
+            GROUP BY artist, title, spotify_track_id
+            ORDER BY play_count DESC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        result = self.conn.execute(query, params).fetchall()
+        columns = ['artist', 'title', 'play_count', 'spotify_track_id']
+        return [dict(zip(columns, row)) for row in result]
+
+    def get_songs_with_spotify_ids_count(self) -> int:
+        """Get count of unique songs with Spotify track IDs."""
+        result = self.conn.execute(
+            "SELECT COUNT(DISTINCT artist || '|||' || title) FROM songs WHERE spotify_track_id IS NOT NULL"
+        ).fetchone()
+        return result[0] if result else 0
+
+    def get_songs_without_spotify_id(self, limit: Optional[int] = None, include_not_found: bool = False) -> List[Dict]:
+        """
+        Get distinct songs that don't have Spotify track ID.
+
+        Args:
+            limit: Optional limit on number of songs to return
+            include_not_found: If True, also include songs marked as NOT_FOUND genre (for retry)
+
+        Returns:
+            List of dictionaries with artist and title
+        """
+        if include_not_found:
+            where_clause = "WHERE spotify_track_id IS NULL"
+        else:
+            where_clause = "WHERE spotify_track_id IS NULL AND (genre IS NULL OR genre != 'NOT_FOUND')"
+
+        query = f"""
+            SELECT DISTINCT artist, title
+            FROM songs
+            {where_clause}
+            ORDER BY artist, title
+        """
+
+        if limit:
+            query += f" LIMIT {limit}"
+
+        result = self.conn.execute(query).fetchall()
+        columns = ['artist', 'title']
+        return [dict(zip(columns, row)) for row in result]
 
     def close(self):
         """Close database connection."""

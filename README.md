@@ -12,6 +12,8 @@ A Python tool to scrape and analyze WDR Cosmo radio playlists, helping you disco
 - Find top artists
 - View database statistics
 - Fast analytical queries with DuckDB's columnar storage
+- **Genre Enrichment**: Enrich songs with genre information from Last.fm
+- **Spotify Integration**: Link songs to Spotify and export playlists
 
 ## Installation
 
@@ -36,7 +38,7 @@ Before using the scraper, you need to identify the correct CSS selectors for the
 Run the inspection helper script to automatically analyze the page structure:
 
 ```bash
-python inspect_playlist.py
+uv run python inspect_playlist.py
 ```
 
 This script will:
@@ -83,102 +85,150 @@ for element in song_elements:
 
 Scrape today's playlist:
 ```bash
-python main.py scrape
+uv run python main.py scrape
 ```
 
 Scrape a specific date:
 ```bash
-python main.py scrape --date 2024-01-15
+uv run python main.py scrape --date 2024-01-15
 ```
 
 Scrape a date range:
 ```bash
-python main.py scrape --start-date 2024-01-01 --end-date 2024-01-31
+uv run python main.py scrape --start-date 2024-01-01 --end-date 2024-01-31
 ```
 
 Scrape the last N days:
 ```bash
-python main.py scrape --days 7
+uv run python main.py scrape --days 7
 ```
 
 ### Analyze Data
 
 Top songs for a specific day:
 ```bash
-python main.py top-day 2024-01-15
+uv run python main.py top-day 2024-01-15
 ```
 
 Top songs for a week (starting from specified date):
 ```bash
-python main.py top-week 2024-01-15
+uv run python main.py top-week 2024-01-15
 ```
 
 Top songs for a month:
 ```bash
-python main.py top-month 2024 1
+uv run python main.py top-month 2024 1
 ```
 
 Top songs for a custom date range:
 ```bash
-python main.py top-range 2024-01-01 2024-01-31
+uv run python main.py top-range 2024-01-01 2024-01-31
 ```
 
 Top songs of all time:
 ```bash
-python main.py top-songs
+uv run python main.py top-songs
 ```
 
 Top songs with date filter:
 ```bash
-python main.py top-songs --start-date 2024-01-01 --end-date 2024-01-31
+uv run python main.py top-songs --start-date 2024-01-01 --end-date 2024-01-31
 ```
 
 Top artists (all time):
 ```bash
-python main.py top-artists
+uv run python main.py top-artists
 ```
 
 Top artists for a date range:
 ```bash
-python main.py top-artists --start-date 2024-01-01 --end-date 2024-01-31
+uv run python main.py top-artists --start-date 2024-01-01 --end-date 2024-01-31
 ```
 
 Show database statistics:
 ```bash
-python main.py stats
+uv run python main.py stats
 ```
+
+### Spotify Setup
+
+To use genre enrichment and playlist export, you need Spotify API credentials:
+
+1. Go to https://developer.spotify.com/dashboard
+2. Create a new app
+3. Copy the Client ID and Client Secret
+4. Add to your `.env` file:
+
+```bash
+cp .env.example .env
+# Edit .env and add your credentials:
+SPOTIFY_CLIENT_ID=your_client_id
+SPOTIFY_CLIENT_SECRET=your_client_secret
+SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
+```
+
+The first time you run a Spotify command, it will open your browser for authentication.
 
 ### Enrich with Genre Information
 
-Add genre information from MusicBrainz to your songs:
+Add genre information (via Last.fm) and Spotify track IDs to your songs. Spotify is used for track matching (playlist export), Last.fm for genres (Spotify deprecated genre data in their API).
 
 ```bash
 # Enrich all songs without genre
-python main.py enrich-genres
+uv run python main.py enrich-genres
 
 # Test with only 10 songs
-python main.py enrich-genres --limit 10
+uv run python main.py enrich-genres --limit 10
 
 # Skip confirmation prompt
-python main.py enrich-genres -y
+uv run python main.py enrich-genres -y
 
 # Show verbose output (including songs not found)
-python main.py enrich-genres -v
+uv run python main.py enrich-genres -v
+
+# Retry songs previously marked as NOT_FOUND
+uv run python main.py enrich-genres --retry
 ```
 
-**Note:** MusicBrainz has a rate limit of 1 request/second, so enriching many songs takes time. The enricher respects this limit automatically.
+This stores both the genre (from Last.fm) and the Spotify track ID for each song, enabling playlist export. Spotify credentials are optional — without them, only genre enrichment runs.
+
+### Export to Spotify Playlist
+
+Create Spotify playlists from your top songs:
+
+```bash
+# Export all-time top 50 songs
+uv run python main.py export-playlist --top --limit 50
+
+# Export top songs of a specific week
+uv run python main.py export-playlist --week 2024-01-15 --limit 50
+
+# Export top songs of a month
+uv run python main.py export-playlist --month 2024-01 --limit 50
+
+# Export top songs by genre
+uv run python main.py export-playlist --genre "hip hop" --limit 30
+
+# Custom playlist name
+uv run python main.py export-playlist --top --limit 100 --name "My Cosmo Favorites"
+
+# Skip confirmation prompt
+uv run python main.py export-playlist --top -y
+```
+
+**Note:** Only songs that were found on Spotify during genre enrichment can be exported to playlists.
 
 ### Options
 
 All analysis commands support `--limit` to control the number of results:
 ```bash
-python main.py top-day 2024-01-15 --limit 20
+uv run python main.py top-day 2024-01-15 --limit 20
 ```
 
 Use a custom database file:
 ```bash
-python main.py --database my_playlist.duckdb scrape
-python main.py --database my_playlist.duckdb top-day 2024-01-15
+uv run python main.py --database my_playlist.duckdb scrape
+uv run python main.py --database my_playlist.duckdb top-day 2024-01-15
 ```
 
 ## Data Protection and Backups
@@ -207,9 +257,11 @@ cp backups/cosmo_playlist_backup_20260113_214057.duckdb cosmo_playlist.duckdb
 - `scraper.py` - Web scraping logic for WDR Cosmo playlist
 - `database.py` - DuckDB database management with backup/verification
 - `analyzer.py` - Data analysis using DuckDB SQL and Polars integration
-- `genre_enricher.py` - MusicBrainz genre enrichment
+- `spotify_client.py` - Spotify API integration for genre enrichment and playlist export
+- `genre_enricher.py` - Last.fm genre enrichment (legacy fallback)
 - `cosmo_playlist.duckdb` - DuckDB database (created automatically)
 - `backups/` - Automatic database backups (created before each data modification)
+- `.spotify_cache` - Spotify OAuth token cache (created automatically)
 
 ## Database Schema
 
@@ -220,10 +272,11 @@ The `songs` table contains:
 - `time` - Time of day when played (e.g., "17:15")
 - `date` - Date when played (e.g., "2026-01-13")
 - `datetime` - Full timestamp (e.g., "2026-01-13T17:15:00")
-- `musicbrainz_genre` - Genre tags from MusicBrainz (e.g., "electronic, dance, house")
+- `genre` - Genre tags from Spotify (e.g., "hip hop, rap, pop")
+- `spotify_track_id` - Spotify track ID for playlist export
 - `created_at` - When the record was inserted
 
-**Note:** The `musicbrainz_genre` column is named to indicate the source and that it may not be 100% accurate. It's populated by running the `enrich-genres` command.
+**Note:** The `genre` and `spotify_track_id` columns are populated by running the `enrich-genres` command.
 
 ## Why DuckDB + Polars?
 
@@ -243,10 +296,10 @@ The combination allows for efficient SQL-based analysis with seamless conversion
 
 ## Next Steps
 
-1. **Run the inspector**: Execute `python inspect_playlist.py` to analyze the page structure
+1. **Run the inspector**: Execute `uv run python inspect_playlist.py` to analyze the page structure
 2. **Update selectors**: Based on the inspector output, update CSS selectors in `scraper.py` (lines 52-75)
-3. **Test the scraper**: Run `python scraper.py` to test scraping
-4. **Start collecting data**: Use `python main.py scrape` to begin building your database
+3. **Test the scraper**: Run `uv run python scraper.py` to test scraping
+4. **Start collecting data**: Use `uv run python main.py scrape` to begin building your database
 5. **Analyze**: Once you have data, use the analysis commands to discover trends
 
 ## Notes
@@ -263,6 +316,7 @@ The combination allows for efficient SQL-based analysis with seamless conversion
 - lxml
 - polars
 - duckdb
+- spotipy (for Spotify integration)
 
 ## License
 
